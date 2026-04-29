@@ -112,11 +112,16 @@ async function getSupplierFromConfig(
     });
 
     const supplierDetails: SupplierDetails = {
-      supplierSpec: {
-        supplierId: selectedSupplierId,
-        specId: preferredPack.id,
-        priority: letterVariant.priority,
-        billingId: preferredPack.billingId,
+      allocationDetails: {
+        supplierSpec: {
+          supplierId: selectedSupplierId,
+          specId: preferredPack.id,
+          priority: letterVariant.priority,
+          billingId: preferredPack.billingId,
+        },
+        allocationStatus: {
+          status: "PENDING",
+        },
       },
       volumeGroupId: volumeGroup.id,
     };
@@ -127,7 +132,23 @@ async function getSupplierFromConfig(
       err: error,
       variantId: letterEvent.data.letterVariantId,
     });
-    throw error;
+    const supplierDetails: SupplierDetails = {
+      allocationDetails: {
+        supplierSpec: {
+          supplierId: "unknown",
+          specId: "unknown",
+          priority: 0,
+          billingId: "unknown",
+        },
+        allocationStatus: {
+          status: "REJECTED",
+          reasonCode: "NO_SUPPLIERS_AVAILABLE",
+          reasonText: error instanceof Error ? error.message : "Unknown error",
+        },
+      },
+      volumeGroupId: "unknown",
+    };
+    return supplierDetails;
   }
 }
 
@@ -224,28 +245,32 @@ export default function createSupplierAllocatorHandler(deps: Deps): SQSHandler {
           letterEvent as PreparedEvents,
           deps,
         );
-        const supplierSpec = supplierDetails?.supplierSpec;
 
         deps.logger.info({
           description: "Resolved supplier details from config",
           supplierDetails,
         });
-
-        incrementAllocation(
-          volumeGroupAllocations,
-          supplierDetails.volumeGroupId,
-          supplierDetails?.supplierSpec.supplierId,
-          1,
-          deps,
-        );
+        const supplierSpec = supplierDetails?.allocationDetails?.supplierSpec;
 
         supplier = supplierSpec.supplierId;
         priority = String(supplierSpec.priority);
 
-        deps.logger.info({
-          description: "Resolved supplier spec",
-          supplierSpec,
-        });
+        if (
+          supplierDetails.allocationDetails.allocationStatus.status ===
+          "PENDING"
+        ) {
+          incrementMetric(perAllocationSuccess, supplier, priority);
+
+          incrementAllocation(
+            volumeGroupAllocations,
+            supplierDetails.volumeGroupId,
+            supplier,
+            1,
+            deps,
+          );
+        } else {
+          incrementMetric(perAllocationFailure, supplier, priority);
+        }
 
         // Send to allocated letters queue
         const queueUrl = process.env.UPSERT_LETTERS_QUEUE_URL;
@@ -255,7 +280,7 @@ export default function createSupplierAllocatorHandler(deps: Deps): SQSHandler {
 
         const queueMessage = {
           letterEvent,
-          supplierSpec,
+          allocationDetails: supplierDetails.allocationDetails,
         };
 
         deps.logger.info({
@@ -270,8 +295,6 @@ export default function createSupplierAllocatorHandler(deps: Deps): SQSHandler {
             MessageBody: JSON.stringify(queueMessage),
           }),
         );
-
-        incrementMetric(perAllocationSuccess, supplier, priority);
       } catch (error) {
         deps.logger.error({
           description: "Error processing allocation of record",
