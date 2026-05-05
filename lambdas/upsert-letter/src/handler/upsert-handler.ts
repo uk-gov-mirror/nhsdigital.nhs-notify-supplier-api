@@ -28,7 +28,11 @@ const idempotencyConfig = new IdempotencyConfig({
   eventKeyJmesPath: "id",
 });
 
-function getOperationFromType(type: string): UpsertOperation {
+function getOperationFromType(type: string, depsLocal: Deps): UpsertOperation {
+  depsLocal.logger.info({
+    description: `Determining operation from event type`,
+    type,
+  });
   if (
     type.startsWith("uk.nhs.notify.letter-rendering.letter-request.prepared")
   ) {
@@ -42,6 +46,11 @@ function getOperationFromType(type: string): UpsertOperation {
           allocationDetails,
         );
         try {
+          deps.logger.info({
+            description: "Attempting to insert letter",
+            eventId: preparedRequest.id,
+            letter: letterToInsert,
+          });
           await deps.letterRepo.putLetter(letterToInsert);
 
           deps.logger.info({
@@ -224,6 +233,7 @@ export default function createUpsertLetterHandler(deps: Deps): SQSHandler {
             messageId: record.messageId,
             type: letterEvent.type,
             supplier: allocationDetails?.supplierSpec,
+            status: allocationDetails?.allocationStatus,
           });
 
           idempotencyConfig.registerLambdaContext(context);
@@ -268,7 +278,14 @@ async function processRecord(
       ? getSupplierIdFromEvent(letterEvent)
       : allocationDetails?.supplierSpec.supplierId;
 
-  const operation = getOperationFromType(letterEvent.type);
+  const operation = getOperationFromType(letterEvent.type, deps);
+
+  deps.logger.info({
+    description: `Processing ${operation.name} operation for letter event`,
+    eventId: letterEvent.id,
+    supplierId: supplier,
+    allocationDetails,
+  });
 
   await runUpsert(
     operation,
